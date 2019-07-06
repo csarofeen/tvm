@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -38,11 +38,20 @@ class ThreadAllreduceBuilder final : public IRMutator {
   explicit ThreadAllreduceBuilder(int warp_size)
       : warp_size_(warp_size) {}
 
+  std::unordered_set<IterVar> iter_vars = {};
+
   Stmt Mutate_(const AttrStmt *op, const Stmt& s) final {
     if (op->attr_key == attr::thread_extent) {
-      thread_extents_.push_back(op);
+
+      IterVar iv(op->node.node_);
+      bool duplicate = iter_vars.find(iv) != iter_vars.end();
+      if(!duplicate){
+	iter_vars.insert(iv);
+	thread_extents_.push_back(op);
+      }
       Stmt ret = IRMutator::Mutate_(op, s);
-      thread_extents_.pop_back();
+      if(!duplicate)
+	thread_extents_.pop_back();
       return ret;
     } else if (op->attr_key == attr::storage_scope) {
       Stmt ret = IRMutator::Mutate_(op, s);
@@ -169,13 +178,16 @@ class ThreadAllreduceBuilder final : public IRMutator {
         }
       }
     }
+
     CHECK_EQ(nmatch, reduce_set.size())
-        << "Not all reduce index are presented in the context";
+       << "Not all reduce index are presented in the context";
+
     std::sort(vred.begin(), vred.end());
     std::sort(vpar.begin(), vpar.end());
     // the size of each index.
     int reduce_extent, group_extent;
     int threadx_extent = 1;
+
     Expr reduce_index = FlattenThread(vred, &reduce_extent);
     Expr group_index = FlattenThread(vpar, &group_extent);
     if (reduce_extent == 1) {
@@ -229,6 +241,7 @@ class ThreadAllreduceBuilder final : public IRMutator {
                         Expr group_index,
                         int reduce_extent,
                         int threadx_extent) {
+
     // Get next power of two
     int reduce_align = 1;
     while (reduce_extent > reduce_align) {

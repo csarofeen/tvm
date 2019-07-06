@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -41,6 +41,59 @@ namespace ir {
 inline Stmt MakeAssertEQ(Expr lhs, Expr rhs, std::string msg) {
   return AssertStmt::make(lhs == rhs, msg, Evaluate::make(0));
 }
+
+class LiftThreads : public IRMutator {
+
+  int stack_level = 0;
+  std::unordered_map<IterVar, int> scope_itervar;
+  std::unordered_map<IterVar, Stmt> itervar_stmt;
+
+public:
+
+  Stmt Mutate_(const AttrStmt *op, const Stmt& s) {
+    if (op->attr_key != attr::thread_extent)
+      return IRMutator::Mutate_(op, s);
+
+    IterVar iv(op->node.node_);
+    CHECK_NE(iv->thread_tag.length(), 0U);
+
+    auto it = scope_itervar.find(iv);
+    if ( it == scope_itervar.end() ){
+      scope_itervar[iv] = stack_level;
+      itervar_stmt[iv] = AttrStmt::make(iv,
+				 "thread_extent",
+				 Expr(op->value),
+				 Evaluate::make(0));
+    }
+
+    return IRMutator::Mutate_(op, s);
+  }
+
+  Stmt Mutate_(const ProducerConsumer *op, const Stmt& s){
+
+    if(!op->is_producer)
+      return IRMutator::Mutate_(op, s);
+
+    ++stack_level;
+    Stmt body = IRMutator::Mutate(op->body);
+    --stack_level;
+
+    if(stack_level > 0)
+      return IRMutator::Mutate_(op, s);
+
+    for(auto it : scope_itervar){
+      if(it.second > stack_level + 1){
+	const AttrStmt* attr = itervar_stmt[it.first].as<AttrStmt>();
+	body = AttrStmt::make(it.first, attr->attr_key, attr->value, body);
+      }
+    }
+
+    scope_itervar.clear();
+    itervar_stmt.clear();
+    return ProducerConsumer::make(op->func, op->is_producer, body);
+  }
+
+};
 
 LoweredFunc MakeAPI(Stmt body,
                     std::string name,
@@ -175,8 +228,12 @@ LoweredFunc MakeAPI(Stmt body,
              device_type, device_id}, Call::Intrinsic)));
     body = Block::make(set_device, body);
   }
+
+  body = LiftThreads().Mutate(body);
+
   n->body = MergeNest(
-      {seq_init, binder.init_nest(), seq_check, binder.asserts()}, body);
+      {seq_init, binder.init_nest(), seq_check, binder.asserts()}, body);\
+
   LoweredFunc f(n);
   Array<Var> undefined = UndefinedVars(f->body, f->args);
   if (undefined.size() != 0) {
