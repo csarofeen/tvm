@@ -154,9 +154,25 @@ def test_cuda_inf_nan():
     check_inf_nan(ctx, 1, float('nan'), 'float64')
 
 
+def test_cuda_reducition_binding():
+    k = tvm.reduce_axis((0, 32), 'k')
+    A = tvm.placeholder((96, 32), name='A')
+    B = tvm.compute( (96,), lambda m:
+                     tvm.sum(A[m, k], axis=k),
+                     name='B')
+    s = tvm.create_schedule(B.op)
+
+    s[B].reorder(B.op.reduce_axis[0], B.op.axis[0])
+
+    mo, _ = s[B].split(B.op.axis[0], 32)
+    s[B].bind(mo, tvm.thread_axis("blockIdx.x"))
+    fcuda = tvm.build(s, [A, B], "cuda")
+
+
 if __name__ == "__main__":
     test_cuda_vectorize_add()
     test_cuda_multiply_add()
     test_cuda_vectorize_load()
     test_cuda_make_int8x4()
     test_cuda_inf_nan()
+    test_cuda_reducition_binding()
