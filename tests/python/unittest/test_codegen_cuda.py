@@ -155,6 +155,10 @@ def test_cuda_inf_nan():
 
 
 def test_cuda_reducition_binding():
+    if not tvm.gpu(0).exist or not tvm.module.enabled("cuda"):
+        print("skip because cuda is not enabled..")
+        return
+
     k = tvm.reduce_axis((0, 32), 'k')
     A = tvm.placeholder((96, 32), name='A')
     B = tvm.compute( (96,), lambda m:
@@ -166,6 +170,7 @@ def test_cuda_reducition_binding():
 
     mo, _ = s[B].split(B.op.axis[0], 32)
     s[B].bind(mo, tvm.thread_axis("blockIdx.x"))
+
     fcuda = tvm.build(s, [A, B], "cuda")
 
 
