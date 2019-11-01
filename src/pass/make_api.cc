@@ -28,6 +28,7 @@
 #include <tvm/buffer.h>
 #include <tvm/runtime/device_api.h>
 #include <vector>
+#include <stack>
 #include <utility>
 #include <unordered_set>
 
@@ -40,6 +41,106 @@ namespace ir {
 inline Stmt MakeAssertEQ(Expr lhs, Expr rhs, std::string msg) {
   return AssertStmt::make(lhs == rhs, msg, Evaluate::make(0));
 }
+
+
+
+class LiftThreads : public IRMutator {
+
+  //Keep a list of thread declarations we need to make.
+  std::unordered_map<const Variable*, int> defined_threads;
+  std::unordered_map<const Variable*, Stmt> thread_var2stmt;
+  std::stack<std::set<const Variable*> > needed_vars;
+  int stack_level = 0;
+
+  //Check if the variable is a thread
+  static bool is_thread(const std::string& s){
+    if (s.compare(0, 9, "blockIdx.") == 0
+	&& s.length() == 10
+	&& static_cast<int>(s[9] - 'x') < 3
+	) return true;
+
+    if (s.compare(0, 10, "threadIdx.") == 0
+	&& s.length() == 11
+	&& static_cast<int>(s[10] - 'x') < 3
+	) return true;
+    return false;
+  }
+
+  //Clear out the thread definitions found in the current scope
+  //as we're leaving that scope
+  void clear_definitions(){
+    std::unordered_map<const Variable*, int> new_definition;
+    for(auto it = defined_threads.begin(); it != defined_threads.end(); ++it){
+      if(it->second != stack_level){
+	new_definition.emplace(it->first, it->second);
+      }
+    }
+    defined_threads = new_definition;
+  }
+
+public:
+
+  Expr Mutate_(const Variable *op, const Expr& e) {
+    if(is_thread(op->name_hint))
+      if(defined_threads.count(op) == 0)
+	needed_vars.top().emplace(op);
+
+    return IRMutator::Mutate_(op, e);
+  }
+
+  Stmt Mutate_(const AttrStmt *op, const Stmt& s) {
+    if (op->attr_key != attr::thread_extent)
+      return IRMutator::Mutate_(op, s);
+
+    IterVar iv = Downcast<IterVar>(op->node);
+    const Variable *var = iv->var.get();
+    defined_threads.emplace(var, stack_level);
+    if(thread_var2stmt.count(iv->var.get()) == 0){
+      Stmt thread_stmt =
+	AttrStmt::make(iv, "thread_extent", Expr(op->value), Evaluate::make(0));
+      thread_var2stmt.emplace(iv->var.get(), thread_stmt);
+    }
+
+    return IRMutator::Mutate_(op, s);
+  }
+
+  Stmt Mutate_(const ProducerConsumer *op, const Stmt& s){
+    if(!op->is_producer)
+      return IRMutator::Mutate_(op, s);
+    ++stack_level;
+
+    needed_vars.push(std::set<const Variable*>());
+    auto body = IRMutator::Mutate(op->body);
+    if(needed_vars.top().size() != 0){
+      for(const auto& var : needed_vars.top()){
+	if(thread_var2stmt.find(var) == thread_var2stmt.end())
+	  continue;
+
+	const AttrStmt* needed_attr = thread_var2stmt.find(var)->second.as<AttrStmt>();
+	body = AttrStmt::make(needed_attr->node,
+			      needed_attr->attr_key, needed_attr->value, body);
+      }
+    }
+
+
+    needed_vars.pop();
+    clear_definitions();
+
+    //Final result, top level producer
+    if(stack_level == 1){
+      needed_vars.push(std::set<const Variable*>());
+      auto body = IRMutator::Mutate_(op, s);
+      needed_vars.pop();
+      clear_definitions();
+      --stack_level;
+      return body;
+    }
+
+    --stack_level;
+    return ProducerConsumer::make(op->func, op->is_producer, body);
+  }
+
+};
 
 LoweredFunc MakeAPI(Stmt body,
                     std::string name,
@@ -192,6 +293,9 @@ LoweredFunc MakeAPI(Stmt body,
              device_type, device_id}, Call::Intrinsic)));
     body = Block::make(set_device, body);
   }
+
+  body = LiftThreads().Mutate(body);
+
   n->body = MergeNest(
       {seq_init, binder.init_nest(), seq_check, binder.asserts()}, body);
   LoweredFunc f(n);
@@ -201,8 +305,8 @@ LoweredFunc MakeAPI(Stmt body,
     for (Var v : undefined) {
       os << " \'" << v->name_hint << "\' ";
     }
-    os << " does not appear in api_args";
-    LOG(FATAL) << "Not all Vars are passed in api_args: " << os.str();
+    //os << " does not appear in api_args";
+    //LOG(FATAL) << "Not all Vars are passed in api_args: " << os.str();
   }
   return f;
 }
