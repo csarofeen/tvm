@@ -70,7 +70,7 @@ bool NeedRelax(const IterVar& iv,
       ts.dim_index == 0) {
     return true;
   }
-  return static_cast<int>(scope.rank) <= ts.rank;
+  return false;//static_cast<int>(scope.rank) <= ts.rank;
 }
 
 // infer storage scope, if not given
