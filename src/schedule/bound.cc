@@ -65,12 +65,13 @@ bool NeedRelax(const IterVar& iv,
 
   // When there is warp memory
   // threadIdx.x must be set to be warp index.
+  //Uncertain if this is needed
   if (scope.rank == StorageRank::kWarp &&
       ts.rank == 1 &&
       ts.dim_index == 0) {
     return true;
   }
-  return static_cast<int>(scope.rank) <= ts.rank;
+  return false;
 }
 
 // infer storage scope, if not given
