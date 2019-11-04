@@ -269,15 +269,60 @@ void BaseComputeOpNode::GatherBound(
   }
 }
 
+class FindThreadIdx : public IRMutator {
+
+public:
+
+  std::set<const Variable*> defined_threads;
+
+  Expr Mutate_(const Variable *op, const Expr& e) {
+    std::string name = op->name_hint;
+    bool is_thread (name.compare(0, 10, "threadIdx.") == 0
+		    && name.length() == 11
+		    && static_cast<int>(name[10] - 'x') < 3
+		    );
+
+    if(is_thread){
+      defined_threads.emplace(op);
+      return Expr(0);
+    }
+    return IRMutator::Mutate_(op, e);
+  }
+
+};
+
 Stmt BaseComputeOpNode::BuildRealize(
     const Stage& stage,
     const std::unordered_map<IterVar, Range>& realize_map,
     const Stmt& body) const {
+
   CHECK_EQ(stage->op.get(), this);
   Region bounds;
-  for (IterVar iv : this->axis) {
-    bounds.push_back(realize_map.at(iv));
+
+  std::unordered_map<const Variable*, Expr> thread_exts;
+  for(auto iv : realize_map){
+    std::string name = iv.first->var->name_hint;
+    if(name.compare(0, 10, "threadIdx.") == 0
+		    && name.length() == 11
+		    && static_cast<int>(name[10] - 'x') < 3
+		    )
+      thread_exts.emplace(iv.first->var.get(), iv.second->extent);
   }
+
+  for(IterVar iv : this->axis) {
+    Range range = realize_map.at(iv);
+    if(stage->scope == "shared"){
+      FindThreadIdx finder;
+      auto new_min = finder.Mutate(range->min);
+      Expr new_extent = range->extent;
+      for(auto tid : finder.defined_threads)
+	new_extent = new_extent * thread_exts[tid];
+      range = Range::make_by_min_extent(new_min, new_extent);
+    }
+
+    bounds.push_back(range);
+  }
+
   Stmt realize = body;
   for (int i = this->num_outputs(); i > 0; --i) {
     Tensor t = stage->op.output(i-1);
