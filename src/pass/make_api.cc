@@ -44,27 +44,43 @@ inline Stmt MakeAssertEQ(Expr lhs, Expr rhs, std::string msg) {
 
 
 
+/*
+There are instances where the bounds pass will infer the shape of a previous
+stage to be based upon the ThreadIdx.x. This can look like:
+
+// attr [compute(C, 0x55e4e813c440)] realize_scope = ""
+
+realize C([0, 1024], [0, 1024]) {
+  produce C {
+    // attr [iter_var(blockIdx.x, , blockIdx.x)] thread_extent = 1024
+    // attr [compute(B, 0x55e4e811b350)] realize_scope = "local"
+    realize B([blockIdx.x, 1], [threadIdx.x, 1]) {
+      produce B {
+        B(blockIdx.x, threadIdx.x) =(A(blockIdx.x, threadIdx.x)*1.001f)
+      }
+      // attr [iter_var(threadIdx.x, , threadIdx.x)] thread_extent = 1024
+      C(blockIdx.x, threadIdx.x) =(B(blockIdx.x, threadIdx.x)*2f)
+    }
+  }
+}
+
+The issue in an example like this is
+// attr [iter_var(threadIdx.x, , threadIdx.x)] thread_extent = 1024
+comes after the use in "produce B".
+
+This pass will check for use of blockIdx or threadIdx and will lift the
+attr statement to the begining of the producer that uses it.
+*/
+
 class LiftThreads : public IRMutator {
 
-  //Keep a list of thread declarations we need to make.
+  //Keep track of thread definitions to see if we're missing one
   std::unordered_map<const Variable*, int> defined_threads;
+  //Translation from thread variable to its associated attr stmt
   std::unordered_map<const Variable*, Stmt> thread_var2stmt;
+  //Keep track of variables that weren't defined but that were used
   std::stack<std::set<const Variable*> > needed_vars;
   int stack_level = 0;
-
-  //Check if the variable is a thread
-  static bool is_thread(const std::string& s){
-    if (s.compare(0, 9, "blockIdx.") == 0
-	&& s.length() == 10
-	&& static_cast<int>(s[9] - 'x') < 3
-	) return true;
-
-    if (s.compare(0, 10, "threadIdx.") == 0
-	&& s.length() == 11
-	&& static_cast<int>(s[10] - 'x') < 3
-	) return true;
-    return false;
-  }
 
   //Clear out the thread definitions found in the current scope
   //as we're leaving that scope
@@ -81,7 +97,21 @@ class LiftThreads : public IRMutator {
 public:
 
   Expr Mutate_(const Variable *op, const Expr& e) {
-    if(is_thread(op->name_hint))
+
+    bool is_thread = false;
+    std::string name = op->name_hint;
+
+    if (name.compare(0, 9, "blockIdx.") == 0
+	&& name.length() == 10
+	&& static_cast<int>(name[9] - 'x') < 3
+	) is_thread = true;
+
+    else if (name.compare(0, 10, "threadIdx.") == 0
+	&& name.length() == 11
+	&& static_cast<int>(name[10] - 'x') < 3
+	) is_thread =  true;
+
+    if(is_thread)
       if(defined_threads.count(op) == 0)
 	needed_vars.top().emplace(op);
 
@@ -305,8 +335,8 @@ LoweredFunc MakeAPI(Stmt body,
     for (Var v : undefined) {
       os << " \'" << v->name_hint << "\' ";
     }
-    //os << " does not appear in api_args";
-    //LOG(FATAL) << "Not all Vars are passed in api_args: " << os.str();
+    os << " does not appear in api_args";
+    LOG(FATAL) << "Not all Vars are passed in api_args: " << os.str();
   }
   return f;
 }
